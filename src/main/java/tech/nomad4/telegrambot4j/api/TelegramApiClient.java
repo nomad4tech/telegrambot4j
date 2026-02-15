@@ -18,8 +18,20 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Telegram Bot API Client - production-ready POJO client with connection pooling and retry logic
- * Can work both standalone and in Spring context
+ * Telegram Bot API Client - production-ready POJO client with connection pooling and retry logic.
+ * Can work both standalone and in Spring context.
+ *
+ * <p><b>Long polling and readTimeout:</b><br>
+ * OkHttp's readTimeout must always be greater than the Telegram long polling timeout.
+ * If readTimeout <= pollingTimeout, OkHttp will terminate the connection before Telegram
+ * responds, causing the polling loop to stop unexpectedly.
+ *
+ * <p>This client handles this automatically in {@link #getUpdates}: for each call, if the
+ * configured readTimeout is insufficient, a temporary OkHttpClient is created via
+ * {@code httpClient.newBuilder()} with readTimeout dynamically set to
+ * {@code pollingTimeout + POLLING_READ_TIMEOUT_BUFFER_SECONDS}. The builder reuses the same
+ * connection pool and settings - only the readTimeout is overridden. If user configured
+ * readTimeout is already sufficient, the base client is used as-is.
  */
 @Slf4j
 public class TelegramApiClient implements Closeable {
@@ -27,6 +39,12 @@ public class TelegramApiClient implements Closeable {
     private static final String API_URL = "https://api.telegram.org/bot";
     private static final ObjectMapper SHARED_OBJECT_MAPPER = createObjectMapper();
     private static final MediaType JSON_MEDIA_TYPE = MediaType.get("application/json");
+
+    /**
+     * Extra buffer added on top of Telegram's pollingTimeout for OkHttp readTimeout.
+     * Ensures OkHttp never cuts the connection before Telegram finishes responding.
+     */
+    private static final int POLLING_READ_TIMEOUT_BUFFER_SECONDS = 35;
 
     private final String botToken;
     private final OkHttpClient httpClient;
@@ -53,8 +71,9 @@ public class TelegramApiClient implements Closeable {
     }
 
     /**
-     * Constructor with custom OkHttpClient
-     * For maximum flexibility - user provides pre-configured client
+     * Constructor with custom OkHttpClient.
+     * For maximum flexibility - user provides pre-configured client.
+     * Note: readTimeout will be dynamically adjusted per-request in getUpdates if needed.
      */
     public TelegramApiClient(String botToken, OkHttpClient httpClient) {
         this.botToken = botToken;
@@ -108,9 +127,18 @@ public class TelegramApiClient implements Closeable {
     }
 
     /**
-     * Get updates using long polling
-     * <a href="https://core.telegram.org/bots/api#getupdates">...</a>
-     * NO RETRY - long polling requests should not be retried
+     * Get updates using long polling.
+     * <a href="https://core.telegram.org/bots/api#getupdates">Telegram API docs</a>
+     *
+     * <p><b>NO RETRY</b> - long polling requests should not be retried.
+     *
+     * <p><b>Dynamic readTimeout:</b> If the configured readTimeout is insufficient for the
+     * requested polling timeout, a temporary OkHttpClient is built via
+     * {@code httpClient.newBuilder()} with readTimeout set to
+     * {@code timeout + POLLING_READ_TIMEOUT_BUFFER_SECONDS}. This guarantees OkHttp never
+     * cuts the connection before Telegram responds. The builder shares the same ConnectionPool
+     * as the base client - no extra resources used. If configured readTimeout is already
+     * sufficient, the base client is used as-is.
      */
     public List<Update> getUpdates(Long offset, Integer limit, Integer timeout) throws IOException {
         Map<String, Object> params = new HashMap<>();
@@ -118,10 +146,31 @@ public class TelegramApiClient implements Closeable {
         if (limit != null) params.put("limit", limit);
         if (timeout != null) params.put("timeout", timeout);
 
+        // Calculate required readTimeout for this polling request
+        int pollingTimeout = timeout != null ? timeout : 30;
+        int requiredReadTimeout = pollingTimeout + POLLING_READ_TIMEOUT_BUFFER_SECONDS;
+
+        // Check if we need to adjust readTimeout
+        // For custom OkHttpClient (ownsHttpClient=false), we can't reliably know the configured
+        // readTimeout, so we always create a new client to be safe
+        OkHttpClient clientToUse;
+        if (ownsHttpClient && config.getReadTimeout().toSeconds() >= requiredReadTimeout) {
+            // User's configured readTimeout is sufficient, use base client
+            clientToUse = httpClient;
+        } else {
+            // Build one-off client with sufficient readTimeout
+            // OkHttpClient.newBuilder() is lightweight - reuses the same ConnectionPool,
+            // dispatcher, and all other settings. Only readTimeout is overridden.
+            clientToUse = httpClient.newBuilder()
+                    .readTimeout(requiredReadTimeout, TimeUnit.SECONDS)
+                    .build();
+        }
+
         TelegramResponse<List<Update>> response = executeMethodInternal(
-            "getUpdates",
-            params,
-            new TypeReference<TelegramResponse<List<Update>>>() {}
+                clientToUse,
+                "getUpdates",
+                params,
+                new TypeReference<TelegramResponse<List<Update>>>() {}
         );
 
         if (response.getOk()) {
@@ -152,9 +201,9 @@ public class TelegramApiClient implements Closeable {
         if (replyMarkup != null) params.put("reply_markup", replyMarkup);
 
         TelegramResponse<Message> response = executeMethodWithRetry(
-            "sendMessage",
-            params,
-            new TypeReference<TelegramResponse<Message>>() {}
+                "sendMessage",
+                params,
+                new TypeReference<TelegramResponse<Message>>() {}
         );
 
         if (response.getOk()) {
@@ -175,9 +224,9 @@ public class TelegramApiClient implements Closeable {
         if (showAlert != null) params.put("show_alert", showAlert);
 
         TelegramResponse<Boolean> response = executeMethodWithRetry(
-            "answerCallbackQuery",
-            params,
-            new TypeReference<TelegramResponse<Boolean>>() {}
+                "answerCallbackQuery",
+                params,
+                new TypeReference<TelegramResponse<Boolean>>() {}
         );
 
         if (response.getOk()) {
@@ -193,9 +242,9 @@ public class TelegramApiClient implements Closeable {
      */
     public User getMe() throws IOException {
         TelegramResponse<User> response = executeMethodWithRetry(
-            "getMe",
-            new HashMap<>(),
-            new TypeReference<TelegramResponse<User>>() {}
+                "getMe",
+                new HashMap<>(),
+                new TypeReference<TelegramResponse<User>>() {}
         );
 
         if (response.getOk()) {
@@ -225,13 +274,13 @@ public class TelegramApiClient implements Closeable {
      * Execute method with retry logic for transient errors
      */
     private <T> T executeMethodWithRetry(String method, Map<String, Object> params,
-                                        ResponseParser<T> parser) throws IOException {
+                                         ResponseParser<T> parser) throws IOException {
         int attempt = 0;
         long backoffMillis = config.getInitialBackoff().toMillis();
 
         while (true) {
             try {
-                String response = executeHttpRequest(method, params);
+                String response = executeHttpRequest(httpClient, method, params);
                 return parser.parse(response);
             } catch (IOException e) {
                 attempt++;
@@ -268,24 +317,24 @@ public class TelegramApiClient implements Closeable {
      * Execute method with TypeReference and retry
      */
     private <T> T executeMethodWithRetry(String method, Map<String, Object> params,
-                                        TypeReference<T> typeReference) throws IOException {
+                                         TypeReference<T> typeReference) throws IOException {
         return executeMethodWithRetry(method, params, response ->
                 objectMapper.readValue(response, typeReference));
     }
 
     /**
-     * Execute method without retry (for long polling)
+     * Execute method without retry (for long polling), using a specific client instance
      */
-    private <T> T executeMethodInternal(String method, Map<String, Object> params,
-                                       TypeReference<T> typeReference) throws IOException {
-        String response = executeHttpRequest(method, params);
+    private <T> T executeMethodInternal(OkHttpClient client, String method, Map<String, Object> params,
+                                        TypeReference<T> typeReference) throws IOException {
+        String response = executeHttpRequest(client, method, params);
         return objectMapper.readValue(response, typeReference);
     }
 
     /**
-     * Execute HTTP request and return response body
+     * Execute HTTP request using the provided client and return response body
      */
-    private String executeHttpRequest(String method, Map<String, Object> params) throws IOException {
+    private String executeHttpRequest(OkHttpClient client, String method, Map<String, Object> params) throws IOException {
         String url = API_URL + botToken + "/" + method;
         String jsonParams = objectMapper.writeValueAsString(params);
 
@@ -295,8 +344,7 @@ public class TelegramApiClient implements Closeable {
                 .post(body)
                 .build();
 
-        Call call = httpClient.newCall(request);
-        try (Response response = call.execute()) {
+        try (Response response = client.newCall(request).execute()) {
             int statusCode = response.code();
             ResponseBody responseBody = response.body();
             String responseString = responseBody != null ? responseBody.string() : "";
@@ -336,8 +384,8 @@ public class TelegramApiClient implements Closeable {
     }
 
     /**
-     * Close OkHttpClient resources
-     * Only closes if this instance owns the HTTP client
+     * Close OkHttpClient resources.
+     * Only closes if this instance owns the HTTP client.
      */
     @Override
     public void close() {
