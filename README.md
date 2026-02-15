@@ -1,13 +1,14 @@
 # telegrambot4j
 
-> Built for my own project and use, polished and open sourced. Use at your own risk - but it works fine for me
+> Built for my own project and use, polished and open sourced. Use at your own risk - but it works fine for me.
 
-Lightweight wrapper over Telegram Bot API for Java. Pure POJO - works standalone or in Spring Boot. Provides production-ready HTTP client with connection pooling, retry logic, and a handler chain pattern for processing updates. No framework dependencies - only OkHttp, Jackson, and Lombok.
+Lightweight wrapper over Telegram Bot API for Java. Pure POJO - works standalone or in Spring Boot. Provides production-ready HTTP client with connection pooling, retry logic, and handler chain pattern for processing updates. No framework dependencies - only OkHttp, Jackson, and Lombok.
 
 ## Features
 
 - **Handler chain pattern** - `UpdateHandler` returns `boolean`, dispatcher stops on first `true`
 - **Production-ready HTTP client** - OkHttp with connection pooling, configurable timeouts, keep-alive, exponential backoff retry
+- **Auto-adjusted polling timeout** - OkHttp readTimeout automatically adjusted per-request to prevent connection drops during long polling
 - **Pure POJO** - no Spring dependencies in core, but Spring-friendly
 - **Long polling service** - automatic offset management, immediate shutdown via thread interruption
 - **Fluent registration API** - `HandlersRegistry` for convenient handler registration
@@ -82,8 +83,8 @@ public class StartCommandHandler implements UpdateHandler {
         if ("/start".equals(update.getMessage().getText())) {
             try {
                 apiClient.sendMessage(
-                        update.getMessage().getChat().getId(),
-                        "Welcome! Use /help for available commands."
+                    update.getMessage().getChat().getId(),
+                    "Welcome! Use /help for available commands."
                 );
                 return true; // handled
             } catch (IOException e) {
@@ -154,25 +155,36 @@ public class BotConfig {
 }
 ```
 
+**application.properties:**
+
+```properties
+telegram.bot.token=${BOT_TOKEN}
+spring.main.keep-alive=true
+```
+
+> **Important:** `spring.main.keep-alive=true` prevents Spring Boot from shutting down after startup. Without it, the application will exit immediately even though the polling thread is running.
+
 ## Configuration
 
 ```java
 TelegramApiConfig config = TelegramApiConfig.builder()
-        .maxIdleConnections(10)    // OkHttp ConnectionPool max idle connections
-        .connectTimeout(Duration.ofSeconds(15))
-        .readTimeout(Duration.ofSeconds(60))
-        .writeTimeout(Duration.ofSeconds(60))
-        .keepAlive(Duration.ofSeconds(60))
-        .maxRetryAttempts(5)
-        .build();
+    .maxIdleConnections(10)    // OkHttp ConnectionPool max idle connections
+    .connectTimeout(Duration.ofSeconds(15))
+    .readTimeout(Duration.ofSeconds(60))
+    .writeTimeout(Duration.ofSeconds(60))
+    .keepAlive(Duration.ofSeconds(60))
+    .maxRetryAttempts(5)
+    .build();
 
 TelegramApiClient apiClient = new TelegramApiClient(botToken, config);
 ```
+
 Defaults: 5 idle connections in OkHttp ConnectionPool, 30s keep-alive, 10s connect timeout, 30s read/write timeout, 3 retry attempts with exponential backoff starting at 500ms.
 
+> **Note on readTimeout:** For long polling (`getUpdates`), the library automatically adjusts OkHttp's readTimeout per-request to ensure it's always greater than the polling timeout. This prevents premature connection drops. If you configure custom readTimeout that's already sufficient, it will be used as-is. Otherwise, readTimeout is dynamically set to `pollingTimeout + 35s` for each polling request.
 
+Or provide fully custom OkHttpClient — useful for proxies, interceptors, custom SSL, etc.:
 
-Or provide fully custom OkHttpClient - useful for proxies, interceptors, custom SSL, etc.:
 ```java
 OkHttpClient customClient = new OkHttpClient.Builder()
     .proxy(new Proxy(Proxy.Type.HTTP, new InetSocketAddress("proxy.host", 8080)))
@@ -185,7 +197,6 @@ OkHttpClient customClient = new OkHttpClient.Builder()
 
 TelegramApiClient apiClient = new TelegramApiClient(botToken, customClient);
 ```
-
 
 ## Shutdown
 
