@@ -35,6 +35,8 @@ Add GitHub Packages repository to your `pom.xml`:
 </repositories>
 ```
 
+See [nomad4tech/telegrambot4j-demo](https://github.com/nomad4tech/telegrambot4jdemo) for working Spring Boot bot built with this library
+
 ## Quick Start
 
 ```java
