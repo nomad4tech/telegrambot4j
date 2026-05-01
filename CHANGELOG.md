@@ -2,6 +2,14 @@
 
 All notable changes to telegrambot4j will be documented in this file.
 
+
+## [1.1.1] - 2026-05-01
+
+### Fixed
+- InlineKeyboardButton.java - Include non-null properties in JSON serialization
+
+---
+
 ## [1.1.0] - 2026-05-01
 
 ### Added
