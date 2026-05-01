@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.*;
+import tech.nomad4.telegrambot4j.model.InlineKeyboardMarkup;
 import tech.nomad4.telegrambot4j.model.Message;
 import tech.nomad4.telegrambot4j.model.Update;
 import tech.nomad4.telegrambot4j.model.User;
@@ -186,6 +187,14 @@ public class TelegramApiClient implements Closeable {
      */
     public Message sendMessage(Long chatId, String text) throws IOException {
         return sendMessage(chatId, text, null, null, null);
+    }
+
+    /**
+     * Send text message with inline keyboard
+     * <a href="https://core.telegram.org/bots/api#sendmessage">...</a>
+     */
+    public Message sendMessage(Long chatId, String text, InlineKeyboardMarkup keyboard) throws IOException {
+        return sendMessage(chatId, text, null, null, keyboard);
     }
 
     /**
