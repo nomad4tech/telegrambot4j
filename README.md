@@ -297,17 +297,6 @@ TelegramApiClient apiClient = new TelegramApiClient(botToken, customClient);
 | `Chat` | Chat info (id, type, title) |
 | `User` | User info (id, username, name) |
 
-## Changelog
-
-### 1.1.0
-- Added `InlineKeyboardButton` with `callback()` and `url()` factory methods
-- Added `InlineKeyboardMarkup` with `of()` and `singleColumn()` factory methods
-- Added `sendMessage(chatId, text, InlineKeyboardMarkup)` convenience method
-- `answerCallbackQuery` was already supported in 1.0.0
-
-### 1.0.0
-- Initial release
-
 ## License
 
 MIT - see [LICENSE](LICENSE) in repository root.
