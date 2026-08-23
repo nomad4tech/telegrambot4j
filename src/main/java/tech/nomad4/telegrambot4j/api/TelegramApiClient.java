@@ -37,7 +37,7 @@ import java.util.concurrent.TimeUnit;
 @Slf4j
 public class TelegramApiClient implements Closeable {
 
-    private static final String API_URL = "https://api.telegram.org/bot";
+    private static final String DEFAULT_API_URL = "https://api.telegram.org/bot";
     private static final ObjectMapper SHARED_OBJECT_MAPPER = createObjectMapper();
     private static final MediaType JSON_MEDIA_TYPE = MediaType.get("application/json");
 
@@ -48,6 +48,7 @@ public class TelegramApiClient implements Closeable {
     private static final int POLLING_READ_TIMEOUT_BUFFER_SECONDS = 35;
 
     private final String botToken;
+    private final String apiUrl;
     private final OkHttpClient httpClient;
     private final ObjectMapper objectMapper;
     private final TelegramApiConfig config;
@@ -64,7 +65,16 @@ public class TelegramApiClient implements Closeable {
      * Constructor with custom configuration
      */
     public TelegramApiClient(String botToken, TelegramApiConfig config) {
+        this(botToken, config, DEFAULT_API_URL);
+    }
+
+    /**
+     * Package-private: lets tests point the client at a local server (e.g. MockWebServer)
+     * instead of the real Telegram API.
+     */
+    TelegramApiClient(String botToken, TelegramApiConfig config, String apiUrl) {
         this.botToken = botToken;
+        this.apiUrl = apiUrl;
         this.config = config;
         this.httpClient = createHttpClient(config);
         this.objectMapper = SHARED_OBJECT_MAPPER;
@@ -78,6 +88,7 @@ public class TelegramApiClient implements Closeable {
      */
     public TelegramApiClient(String botToken, OkHttpClient httpClient) {
         this.botToken = botToken;
+        this.apiUrl = DEFAULT_API_URL;
         this.config = TelegramApiConfig.defaults();
         this.httpClient = httpClient;
         this.objectMapper = SHARED_OBJECT_MAPPER;
@@ -89,6 +100,7 @@ public class TelegramApiClient implements Closeable {
      */
     public TelegramApiClient(String botToken, OkHttpClient httpClient, ObjectMapper objectMapper) {
         this.botToken = botToken;
+        this.apiUrl = DEFAULT_API_URL;
         this.config = TelegramApiConfig.defaults();
         this.httpClient = httpClient;
         this.objectMapper = objectMapper;
@@ -209,17 +221,11 @@ public class TelegramApiClient implements Closeable {
         if (replyToMessageId != null) params.put("reply_to_message_id", replyToMessageId);
         if (replyMarkup != null) params.put("reply_markup", replyMarkup);
 
-        TelegramResponse<Message> response = executeMethodWithRetry(
+        return executeTelegramMethodWithRetry(
                 "sendMessage",
                 params,
                 new TypeReference<TelegramResponse<Message>>() {}
-        );
-
-        if (response.getOk()) {
-            return response.getResult();
-        } else {
-            throw new IOException("Telegram API error: " + response.getDescription());
-        }
+        ).getResult();
     }
 
     /**
@@ -232,17 +238,11 @@ public class TelegramApiClient implements Closeable {
         if (text != null) params.put("text", text);
         if (showAlert != null) params.put("show_alert", showAlert);
 
-        TelegramResponse<Boolean> response = executeMethodWithRetry(
+        return executeTelegramMethodWithRetry(
                 "answerCallbackQuery",
                 params,
                 new TypeReference<TelegramResponse<Boolean>>() {}
-        );
-
-        if (response.getOk()) {
-            return response.getResult();
-        } else {
-            throw new IOException("Telegram API error: " + response.getDescription());
-        }
+        ).getResult();
     }
 
     /**
@@ -250,17 +250,11 @@ public class TelegramApiClient implements Closeable {
      * <a href="https://core.telegram.org/bots/api#getme">...</a>
      */
     public User getMe() throws IOException {
-        TelegramResponse<User> response = executeMethodWithRetry(
+        return executeTelegramMethodWithRetry(
                 "getMe",
                 new HashMap<>(),
                 new TypeReference<TelegramResponse<User>>() {}
-        );
-
-        if (response.getOk()) {
-            return response.getResult();
-        } else {
-            throw new IOException("Telegram API error: " + response.getDescription());
-        }
+        ).getResult();
     }
 
     /**
@@ -299,25 +293,32 @@ public class TelegramApiClient implements Closeable {
                     throw e;
                 }
 
-                if (!isRetryableError(e)) {
+                long waitMillis;
+                if (e instanceof TelegramRateLimitException rateLimit) {
+                    // Telegram tells us exactly how long to wait - honor it as-is, not
+                    // subject to maxBackoff: ignoring it just gets us throttled again.
+                    waitMillis = rateLimit.getRetryAfterSeconds() * 1000L;
+                    log.warn("Rate limited on attempt {} for method {}: waiting {}s as instructed by Telegram",
+                            attempt, method, rateLimit.getRetryAfterSeconds());
+                } else if (isRetryableError(e)) {
+                    waitMillis = backoffMillis;
+                    log.warn("Retryable error on attempt {} for method {}: {}. Retrying in {}ms",
+                            attempt, method, e.getMessage(), backoffMillis);
+                    backoffMillis = Math.min(
+                            (long) (backoffMillis * config.getBackoffMultiplier()),
+                            config.getMaxBackoff().toMillis()
+                    );
+                } else {
                     log.debug("Non-retryable error for method {}: {}", method, e.getMessage());
                     throw e;
                 }
 
-                log.warn("Retryable error on attempt {} for method {}: {}. Retrying in {}ms",
-                        attempt, method, e.getMessage(), backoffMillis);
-
                 try {
-                    Thread.sleep(backoffMillis);
+                    Thread.sleep(waitMillis);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                     throw new IOException("Interrupted during retry backoff", ie);
                 }
-
-                backoffMillis = Math.min(
-                        (long) (backoffMillis * config.getBackoffMultiplier()),
-                        config.getMaxBackoff().toMillis()
-                );
             }
         }
     }
@@ -329,6 +330,34 @@ public class TelegramApiClient implements Closeable {
                                          TypeReference<T> typeReference) throws IOException {
         return executeMethodWithRetry(method, params, response ->
                 objectMapper.readValue(response, typeReference));
+    }
+
+    /**
+     * Execute a Telegram API method whose response is the standard {@code {ok, result,
+     * error_code, description, parameters}} envelope, with retry logic. Unlike {@link
+     * #executeMethod}, this validates {@code ok} INSIDE the retry loop - so a 429
+     * (flood control) response is retried honoring Telegram's {@code retry_after}, not
+     * just transport-level failures like connection errors or 5xx.
+     */
+    private <T> TelegramResponse<T> executeTelegramMethodWithRetry(String method, Map<String, Object> params,
+                                                                    TypeReference<TelegramResponse<T>> typeReference) throws IOException {
+        return executeMethodWithRetry(method, params, response ->
+                parseAndValidate(objectMapper.readValue(response, typeReference)));
+    }
+
+    /**
+     * Turns an {@code ok=false} envelope into an exception - {@link TelegramRateLimitException}
+     * for flood control (429 with {@code retry_after}), plain {@link IOException} otherwise.
+     */
+    private <T> TelegramResponse<T> parseAndValidate(TelegramResponse<T> response) throws IOException {
+        if (Boolean.TRUE.equals(response.getOk())) {
+            return response;
+        }
+        Integer retryAfter = response.getParameters() != null ? response.getParameters().getRetryAfter() : null;
+        if (Integer.valueOf(429).equals(response.getErrorCode()) && retryAfter != null) {
+            throw new TelegramRateLimitException(response.getDescription(), retryAfter);
+        }
+        throw new IOException("Telegram API error: " + response.getDescription());
     }
 
     /**
@@ -344,7 +373,7 @@ public class TelegramApiClient implements Closeable {
      * Execute HTTP request using the provided client and return response body
      */
     private String executeHttpRequest(OkHttpClient client, String method, Map<String, Object> params) throws IOException {
-        String url = API_URL + botToken + "/" + method;
+        String url = apiUrl + botToken + "/" + method;
         String jsonParams = objectMapper.writeValueAsString(params);
 
         RequestBody body = RequestBody.create(jsonParams, JSON_MEDIA_TYPE);

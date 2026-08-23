@@ -7,7 +7,8 @@ Lightweight wrapper over Telegram Bot API for Java. Pure POJO - works standalone
 ## Features
 
 - **Handler chain pattern** - `UpdateHandler` returns `boolean`, dispatcher stops on first `true`
-- **Production-ready HTTP client** - OkHttp with connection pooling, configurable timeouts, keep-alive, exponential backoff retry
+- **Production-ready HTTP client** - OkHttp with connection pooling, configurable timeouts, keep-alive, exponential backoff retry, and honors Telegram's `retry_after` on `429` flood control instead of guessing
+- **Bot-blocked detection** - `Update.myChatMember` delivers `my_chat_member` updates, so you know the moment a user blocks or unblocks the bot - no need to wait for a failed `sendMessage`
 - **Auto-adjusted polling timeout** - OkHttp readTimeout automatically adjusted per-request to prevent connection drops during long polling
 - **Inline keyboard support** - `InlineKeyboardMarkup` with callback buttons and URL buttons
 - **Callback query handling** - `CallbackQuery` model + `answerCallbackQuery` method
@@ -22,7 +23,7 @@ Lightweight wrapper over Telegram Bot API for Java. Pure POJO - works standalone
 <dependency>
     <groupId>tech.nomad4</groupId>
     <artifactId>telegrambot4j</artifactId>
-    <version>1.1.0</version>
+    <version>1.2.0</version>
 </dependency>
 ```
 
@@ -174,6 +175,36 @@ public class MyCallbackHandler implements UpdateHandler {
 
 Always call `answerCallbackQuery` after handling — otherwise the loading spinner stays on the button.
 
+## Detecting Bot Blocked/Unblocked
+
+Telegram sends a `my_chat_member` update whenever the bot's own status in a chat changes —
+including a user blocking or unblocking the bot in a private chat. This arrives on its own,
+with no extra opt-in needed and no failed `sendMessage` required to find out:
+
+```java
+public class BlockedStatusHandler implements UpdateHandler {
+
+    @Override
+    public boolean handle(Update update) {
+        if (update.getMyChatMember() == null) {
+            return false;
+        }
+
+        ChatMemberUpdated change = update.getMyChatMember();
+        Long userId = change.getChat().getId();
+        String newStatus = change.getNewChatMember().getStatus();
+
+        if ("kicked".equals(newStatus)) {
+            // user blocked the bot - stop sending, mark them inactive
+        } else if ("member".equals(newStatus)) {
+            // user (re)started the bot / unblocked it
+        }
+
+        return true;
+    }
+}
+```
+
 ## How Dispatching Works
 
 `UpdateDispatcher` maintains a list of `UpdateHandler` instances and invokes them sequentially. Each handler returns `boolean`: `true` means "I processed this update, stop the chain", `false` means "not mine, try next". This implements the Chain of Responsibility pattern - each update is processed by exactly one handler. The dispatcher itself implements `UpdateHandler`, so dispatchers can be nested.
@@ -296,6 +327,16 @@ TelegramApiClient apiClient = new TelegramApiClient(botToken, customClient);
 | `InlineKeyboardButton` | Single inline button (callback or URL) |
 | `Chat` | Chat info (id, type, title) |
 | `User` | User info (id, username, name) |
+| `ChatMemberUpdated` | Delivered as `Update.myChatMember` - a change in the bot's own chat status |
+| `ChatMember` | `status` (`member`, `kicked`, ...) + `user` for one side of a `ChatMemberUpdated` |
+
+## Known limitations
+
+- **`retry_after` wait is synchronous** - when Telegram returns `429` with a `retry_after`,
+  `sendMessage`/`answerCallbackQuery`/`getMe` block the calling thread via `Thread.sleep`
+  for that long before retrying (up to `maxRetryAttempts` times). Fine for a scheduled job
+  or a background poller thread; if you call these from a request thread, a large
+  `retry_after` will hold that thread for the whole wait.
 
 ## License
 

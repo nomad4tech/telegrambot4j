@@ -23,5 +23,8 @@ public class TelegramResponse<T> {
 
     @JsonProperty("description")
     private String description;
+
+    @JsonProperty("parameters")
+    private ResponseParameters parameters;
 }
 
