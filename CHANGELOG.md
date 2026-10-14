@@ -3,6 +3,28 @@
 All notable changes to telegrambot4j will be documented in this file.
 
 
+## [1.2.1] - 2026-10-14
+
+### Fixed
+- Long polling silently stopped for good after a single read/connect timeout.
+  `TelegramBotPollingService` treated every `InterruptedIOException` as a normal shutdown,
+  but OkHttp reports a timeout as `SocketTimeoutException`, which extends
+  `InterruptedIOException`. The loop exited ("Telegram bot polling stopped"), `isRunning()`
+  became `false` and the bot stopped receiving updates while the application kept running.
+  A timeout is now handled like any other `IOException`: logged, a pause of `errorDelay`,
+  then the next attempt. Polling ends only when it was asked to end (`stopPolling()` /
+  `shutdown()`, which set `running=false` before interrupting the thread, or an interrupted
+  thread).
+- An unexpected `RuntimeException` thrown by `getUpdates` no longer terminates the polling
+  loop; it is logged and polling continues after `errorDelay`.
+
+### Notes
+- If you saw "Telegram bot polling stopped" without having stopped the bot, you were hit by
+  this. Applications that must never go deaf should still watch `isRunning()` and restart
+  polling when it is `false`.
+
+---
+
 ## [1.2.0] - 2026-08-24
 
 ### Added

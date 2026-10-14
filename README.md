@@ -13,7 +13,7 @@ Lightweight wrapper over Telegram Bot API for Java. Pure POJO - works standalone
 - **Inline keyboard support** - `InlineKeyboardMarkup` with callback buttons and URL buttons
 - **Callback query handling** - `CallbackQuery` model + `answerCallbackQuery` method
 - **Pure POJO** - no Spring dependencies in core, but Spring-friendly
-- **Long polling service** - automatic offset management, immediate shutdown via thread interruption
+- **Long polling service** - automatic offset management, immediate shutdown via thread interruption; keeps polling through transient errors (timeouts, `5xx`, network failures) and stops only when asked to
 - **Fluent registration API** - `HandlersRegistry` for convenient handler registration
 - **Auto-discovery** - `scanAndRegister(packageName)` finds handlers via reflection
 
@@ -23,7 +23,7 @@ Lightweight wrapper over Telegram Bot API for Java. Pure POJO - works standalone
 <dependency>
     <groupId>tech.nomad4</groupId>
     <artifactId>telegrambot4j</artifactId>
-    <version>1.2.0</version>
+    <version>1.2.1</version>
 </dependency>
 ```
 

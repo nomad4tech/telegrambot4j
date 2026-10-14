@@ -7,7 +7,6 @@ import tech.nomad4.telegrambot4j.api.TelegramApiClient;
 import tech.nomad4.telegrambot4j.model.Update;
 
 import java.io.IOException;
-import java.io.InterruptedIOException;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -87,21 +86,30 @@ public class TelegramBotPollingService {
                         }
                     }
 
-                } catch (InterruptedIOException e) {
-                    log.debug("Polling interrupted (normal shutdown)");
-                    break;
                 } catch (IOException e) {
+                    // InterruptedIOException is deliberately NOT a stop signal on its own: OkHttp reports a
+                    // read/connect timeout as SocketTimeoutException, which extends InterruptedIOException,
+                    // and a timeout is a transient error. Polling stops only when it was asked to stop
+                    // (stopPolling sets running=false before interrupting the thread).
                     if (Thread.currentThread().isInterrupted() || !running.get()) {
-                        log.debug("Polling interrupted during IO error handling");
+                        log.debug("Polling interrupted (normal shutdown)");
                         break;
                     }
 
                     log.error("Error getting updates: {}", e.getMessage());
-                    try {
-                        Thread.sleep(errorDelay);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        log.debug("Sleep interrupted (normal shutdown)");
+                    if (!pauseAfterError()) {
+                        break;
+                    }
+                } catch (RuntimeException e) {
+                    // Anything unexpected from the client must not end polling silently: the application
+                    // keeps running, but the bot would stop receiving updates.
+                    if (Thread.currentThread().isInterrupted() || !running.get()) {
+                        log.debug("Polling interrupted (normal shutdown)");
+                        break;
+                    }
+
+                    log.error("Unexpected error getting updates: {}", e.getMessage(), e);
+                    if (!pauseAfterError()) {
                         break;
                     }
                 }
@@ -110,6 +118,22 @@ public class TelegramBotPollingService {
             pollingThread = null;
             running.set(false);
             log.info("Telegram bot polling stopped");
+        }
+    }
+
+    /**
+     * Wait {@link #errorDelay} before the next attempt after a failed poll.
+     *
+     * @return {@code false} if the thread was interrupted while waiting (shutdown), {@code true} to continue
+     */
+    private boolean pauseAfterError() {
+        try {
+            Thread.sleep(errorDelay);
+            return true;
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            log.debug("Sleep interrupted (normal shutdown)");
+            return false;
         }
     }
 
